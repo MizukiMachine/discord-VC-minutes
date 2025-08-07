@@ -2,9 +2,9 @@ import discord
 from discord.ext import commands
 from typing import Dict, Optional
 import asyncio
-from unittest.mock import Mock
 
 from services.scheduler.priority_scheduler import PriorityScheduler
+from services.audio.recorder import AudioRecorder
 from infrastructure.config.settings import EnvironmentConfig
 from framework.error_code.errors import DetailedError, ErrorCode
 
@@ -22,7 +22,7 @@ class DiscordMinutesBot(commands.Bot):
         )
         
         self.config = config or EnvironmentConfig()
-        self.recorders: Dict[int, object] = {}
+        self.recorders: Dict[int, AudioRecorder] = {}
         self.scheduler = PriorityScheduler(
             max_concurrent=self.config.get_config('MAX_CONCURRENT_RECORDINGS') or 4
         )
@@ -84,21 +84,43 @@ class DiscordMinutesBot(commands.Bot):
         if channel.id in self.recorders:
             return False
             
-        if is_manual:
-            replaced_vc = self.scheduler.add_manual_recording(channel.id, len(channel.members))
-            if replaced_vc and replaced_vc in self.recorders:
-                await self.stop_recording_by_id(replaced_vc)
-        else:
-            if not self.scheduler.add_auto_recording(channel.id, len(channel.members)):
-                return False
-        
-        self.recorders[channel.id] = Mock()  # Placeholder for actual recorder
-        return True
+        try:
+            if is_manual:
+                replaced_vc = self.scheduler.add_manual_recording(channel.id, len(channel.members))
+                if replaced_vc and replaced_vc in self.recorders:
+                    await self.stop_recording_by_id(replaced_vc)
+            else:
+                if not self.scheduler.add_auto_recording(channel.id, len(channel.members)):
+                    return False
+            
+            voice_client = await channel.connect()
+            recorder = AudioRecorder(channel, voice_client)
+            await recorder.start()
+            
+            self.recorders[channel.id] = recorder
+            return True
+            
+        except Exception as e:
+            print(f"Failed to start recording for {channel.name}: {e}")
+            if channel.id in self.recorders:
+                del self.recorders[channel.id]
+            self.scheduler.remove_recording(channel.id)
+            return False
     
     async def stop_recording(self, channel: discord.VoiceChannel) -> None:
         await self.stop_recording_by_id(channel.id)
     
     async def stop_recording_by_id(self, channel_id: int) -> None:
         if channel_id in self.recorders:
-            del self.recorders[channel_id]
-            self.scheduler.remove_recording(channel_id)
+            try:
+                recorder = self.recorders[channel_id]
+                await recorder.stop()
+                
+                if recorder.voice_client and recorder.voice_client.is_connected():
+                    await recorder.voice_client.disconnect()
+                    
+            except Exception as e:
+                print(f"Error stopping recording for channel {channel_id}: {e}")
+            finally:
+                del self.recorders[channel_id]
+                self.scheduler.remove_recording(channel_id)
