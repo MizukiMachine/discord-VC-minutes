@@ -55,11 +55,49 @@ class PanelManager(UIService):
     
     async def post_panel(self, channel: discord.VoiceChannel, state: PanelState) -> Optional[discord.Message]:
         """Post control panel to voice channel's text chat"""
-        return None
+        try:
+            # Find corresponding text channel
+            text_channel = None
+            for text_ch in channel.guild.text_channels:
+                if text_ch.name == f"{channel.name.lower().replace(' ', '-')}" or \
+                   text_ch.name == f"{channel.name.lower()}-text" or \
+                   text_ch.category == channel.category:
+                    text_channel = text_ch
+                    break
+            
+            if not text_channel:
+                # Use first text channel as fallback
+                text_channel = channel.guild.text_channels[0]
+            
+            embed = await self.create_embed(state, channel.name)
+            view = self.create_view(state)
+            
+            message = await text_channel.send(embed=embed, view=view)
+            self.panels[channel.id] = message
+            
+            return message
+            
+        except Exception as e:
+            print(f"Failed to post panel for channel {channel.name}: {e}")
+            return None
     
     async def update_panel(self, channel: discord.VoiceChannel, state: PanelState) -> None:
         """Update existing control panel"""
-        pass
+        if channel.id not in self.panels:
+            return
+        
+        try:
+            message = self.panels[channel.id]
+            embed = await self.create_embed(state, channel.name)
+            view = self.create_view(state)
+            
+            await message.edit(embed=embed, view=view)
+            
+        except Exception as e:
+            print(f"Failed to update panel for channel {channel.name}: {e}")
+            # Remove invalid panel reference
+            if channel.id in self.panels:
+                del self.panels[channel.id]
     
     async def handle_stop(self, interaction: discord.Interaction, channel_id: int) -> None:
         """Handle stop recording button"""
