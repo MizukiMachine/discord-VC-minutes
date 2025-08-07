@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from typing import Dict, Optional
 import asyncio
+import time
 
 from services.scheduler.priority_scheduler import PriorityScheduler
 from services.audio.recorder import AudioRecorder
@@ -9,6 +10,8 @@ from services.redis.buffer_manager import RedisBufferManager
 from services.summary.openai_client import OpenAIClient
 from infrastructure.config.settings import EnvironmentConfig
 from framework.error_code.errors import DetailedError, ErrorCode
+from application.ui.panel_manager import PanelManager
+from framework.interfaces.ui import PanelState
 
 class DiscordMinutesBot(commands.Bot):
     def __init__(self, config: Optional[EnvironmentConfig] = None):
@@ -28,6 +31,8 @@ class DiscordMinutesBot(commands.Bot):
         self.scheduler = PriorityScheduler(
             max_concurrent=self.config.get_config('MAX_CONCURRENT_RECORDINGS') or 4
         )
+        self.panel_manager = PanelManager(self.config, self)
+        self.recording_start_times: Dict[int, float] = {}
     
     async def start_bot(self) -> None:
         token = self.config.get_config('DISCORD_BOT_TOKEN')
@@ -100,6 +105,12 @@ class DiscordMinutesBot(commands.Bot):
             await recorder.start()
             
             self.recorders[channel.id] = recorder
+            self.recording_start_times[channel.id] = time.time()
+            
+            # Create or update control panel
+            panel_state = self.create_panel_state(channel)
+            await self.panel_manager.post_panel(channel, panel_state)
+            
             return True
             
         except Exception as e:
@@ -126,6 +137,14 @@ class DiscordMinutesBot(commands.Bot):
             finally:
                 del self.recorders[channel_id]
                 self.scheduler.remove_recording(channel_id)
+                if channel_id in self.recording_start_times:
+                    del self.recording_start_times[channel_id]
+                
+                # Update control panel to show stopped state
+                channel = self.get_channel(channel_id)
+                if channel:
+                    panel_state = self.create_panel_state(channel)
+                    await self.panel_manager.update_panel(channel, panel_state)
     
     @commands.command(name='sofar', help='現在のボイスチャンネルの議事録を要約します')
     async def sofar_command(self, ctx: commands.Context) -> None:
@@ -205,3 +224,45 @@ class DiscordMinutesBot(commands.Bot):
         except Exception as e:
             await ctx.send(f"❌ 予期しないエラーが発生しました: {str(e)}")
             print(f"Error in sofar command: {e}")
+    
+    def create_panel_state(self, channel: discord.VoiceChannel) -> PanelState:
+        """Create PanelState from bot's current state"""
+        is_recording = channel.id in self.recorders
+        elapsed_time = 0
+        
+        if is_recording and channel.id in self.recording_start_times:
+            elapsed_time = int(time.time() - self.recording_start_times[channel.id])
+        
+        non_bot_members = [m for m in channel.members if not m.bot]
+        member_count = len(non_bot_members)
+        
+        return PanelState(
+            channel_id=channel.id,
+            is_recording=is_recording,
+            elapsed_time=elapsed_time,
+            member_count=member_count
+        )
+    
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Handle button interactions"""
+        if not interaction.custom_id:
+            return
+        
+        parts = interaction.custom_id.split('_')
+        if len(parts) != 2:
+            return
+        
+        action, channel_id_str = parts
+        try:
+            channel_id = int(channel_id_str)
+        except ValueError:
+            return
+        
+        if action == "stop":
+            await self.panel_manager.handle_stop(interaction, channel_id)
+        elif action == "sofar":
+            await self.panel_manager.handle_summary(interaction, channel_id)
+        elif action == "save30":
+            await self.panel_manager.handle_save_transcript(interaction, channel_id)
+        elif action == "start":
+            await self.panel_manager.handle_start_recording(interaction, channel_id)
