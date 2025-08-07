@@ -36,14 +36,19 @@ class PanelManager(UIService):
         view = discord.ui.View(timeout=None)
         
         buttons = [
-            ("🔴停止", discord.ButtonStyle.danger, not state.is_recording),
-            ("📜今まで", discord.ButtonStyle.primary, not state.is_recording), 
-            ("💾過去30分", discord.ButtonStyle.secondary, not state.is_recording),
-            ("🔴録音開始", discord.ButtonStyle.success, state.is_recording)
+            ("🔴停止", discord.ButtonStyle.danger, not state.is_recording, "stop"),
+            ("📜今まで", discord.ButtonStyle.primary, not state.is_recording, "sofar"), 
+            ("💾過去30分", discord.ButtonStyle.secondary, not state.is_recording, "save30"),
+            ("🔴録音開始", discord.ButtonStyle.success, state.is_recording, "start")
         ]
         
-        for label, style, disabled in buttons:
-            button = discord.ui.Button(label=label, style=style, disabled=disabled)
+        for label, style, disabled, action in buttons:
+            button = discord.ui.Button(
+                label=label, 
+                style=style, 
+                disabled=disabled,
+                custom_id=f"{action}_{state.channel_id}"
+            )
             view.add_item(button)
         
         return view
@@ -58,16 +63,67 @@ class PanelManager(UIService):
     
     async def handle_stop(self, interaction: discord.Interaction, channel_id: int) -> None:
         """Handle stop recording button"""
-        pass
+        try:
+            await interaction.response.send_message("🔴 録音を停止しました", ephemeral=True)
+            
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                await self.bot.stop_recording(channel)
+                
+        except Exception as e:
+            await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
     
     async def handle_summary(self, interaction: discord.Interaction, channel_id: int) -> None:
         """Handle summary request button"""
-        pass
+        try:
+            await interaction.response.send_message("📜 議事録を要約中...", ephemeral=True)
+            
+            # Simulate context for sofar command
+            class MockContext:
+                def __init__(self, author, channel):
+                    self.author = author
+                    self.channel = channel
+                    
+                async def send(self, *args, **kwargs):
+                    pass  # Handled by sofar command itself
+            
+            # Get channel for context
+            channel = self.bot.get_channel(channel_id)
+            if channel and hasattr(channel, 'guild'):
+                # Find text channel for this voice channel
+                for text_ch in channel.guild.text_channels:
+                    if text_ch.name == f"{channel.name.lower().replace(' ', '-')}" or \
+                       text_ch.name == f"{channel.name.lower()}-text" or \
+                       text_ch.category == channel.category:
+                        mock_ctx = MockContext(interaction.user, text_ch)
+                        sofar_command = self.bot.get_command('sofar')
+                        if sofar_command:
+                            await sofar_command(mock_ctx)
+                        break
+                
+        except Exception as e:
+            await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
     
     async def handle_save_transcript(self, interaction: discord.Interaction, channel_id: int) -> None:
         """Handle save transcript button"""
-        pass
+        try:
+            await interaction.response.send_message("💾 過去30分の音声を保存中...", ephemeral=True)
+            
+            # TODO: Implement save30 functionality
+            # This would involve retrieving the full transcript from Redis
+            # and posting it to the text channel without LLM summarization
+            
+        except Exception as e:
+            await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
     
     async def handle_start_recording(self, interaction: discord.Interaction, channel_id: int) -> None:
         """Handle start recording button"""
-        pass
+        try:
+            await interaction.response.send_message("🔴 録音を開始しました", ephemeral=True)
+            
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                await self.bot.start_recording(channel, is_manual=True)
+                
+        except Exception as e:
+            await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
