@@ -1,5 +1,5 @@
-# Discord Bot
-discord.py[voice]==2.3.2
+# Discord Bot (py-cord for enhanced voice capabilities)
+py-cord[voice]==2.4.1
 
 # Audio Processing
 pydub==0.25.1
