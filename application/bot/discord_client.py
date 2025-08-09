@@ -45,6 +45,9 @@ class DiscordMinutesBot(commands.Bot):
             for guild in self.guilds:
                 await self.setup_permanent_panels(guild)
                 await self.scan_voice_channels(guild)
+        
+        # Start periodic panel update task (every 30 seconds)
+        asyncio.create_task(self._periodic_panel_update())
     
     async def setup_permanent_panels(self, guild: discord.Guild) -> None:
         """Setup permanent control panels for all voice channels"""
@@ -76,6 +79,35 @@ class DiscordMinutesBot(commands.Bot):
             panel_state = self.create_panel_state(vc)
             if vc.id in self.panel_manager.panels:
                 await self.panel_manager.update_panel(vc, panel_state)
+    
+    async def _periodic_panel_update(self) -> None:
+        """Periodically update and repost panels to keep them visible"""
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                # Update panels for all voice channels
+                for guild in self.guilds:
+                    for vc in guild.voice_channels:
+                        if vc.id in self.recorders:
+                            # Calculate recording duration
+                            duration = 0
+                            if vc.id in self.recording_start_times:
+                                duration = int(time.time() - self.recording_start_times[vc.id])
+                            
+                            panel_state = PanelState(
+                                channel_id=vc.id,
+                                is_recording=True,
+                                elapsed_time=duration,
+                                member_count=len(vc.members)
+                            )
+                            
+                            # This will automatically repost if 10 minutes have passed
+                            await self.panel_manager.update_panel(vc, panel_state)
+                            
+            except Exception as e:
+                print(f"⚠️ Error in periodic panel update: {e}")
+                await asyncio.sleep(30)
     
     async def on_voice_state_update(
         self, 

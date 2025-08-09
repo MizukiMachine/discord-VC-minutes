@@ -18,7 +18,7 @@ class PanelManager(UIService):
         self.bot = bot
         self.panels: Dict[int, discord.Message] = {}
         self.panel_last_posted: Dict[int, float] = {}  # 最終投稿時間追跡
-        self.repost_interval = 600  # 10分ごとに再投稿
+        self.repost_interval = 300  # 5分ごとに再投稿（常設パネル維持）
         self.buffer_manager = RedisBufferManager(
             core_service=config,
             redis_url=config.get_config('REDIS_URL')
@@ -91,6 +91,13 @@ class PanelManager(UIService):
             self.panels[channel.id] = message
             self.panel_last_posted[channel.id] = time.time()
             
+            # Pin the message to keep it visible
+            try:
+                await message.pin()
+                print(f"📌 Panel pinned for {channel.name}")
+            except discord.HTTPException as e:
+                print(f"⚠️ Could not pin panel: {e}")
+            
             return message
             
         except Exception as e:
@@ -103,21 +110,22 @@ class PanelManager(UIService):
             return
         
         try:
-            # 定期再投稿チェック
-            current_time = time.time()
-            last_posted = self.panel_last_posted.get(channel.id, 0)
+            # ピン留めされたメッセージを更新のみ（再投稿しない）
+            message = self.panels[channel.id]
+            embed = await self.create_embed(state, channel.name)
+            view = self.create_view(state)
             
-            if current_time - last_posted > self.repost_interval:
-                # 10分経過: 新しいパネルを投稿
-                print(f"🔄 Reposting panel for {channel.name} (10min interval)")
-                await self.repost_panel(channel, state)
-            else:
-                # 通常の更新
-                message = self.panels[channel.id]
-                embed = await self.create_embed(state, channel.name)
-                view = self.create_view(state)
-                
-                await message.edit(embed=embed, view=view)
+            await message.edit(embed=embed, view=view)
+            
+            # メッセージがピン留めされているか確認
+            try:
+                channel_pins = await message.channel.pins()
+                if message not in channel_pins:
+                    # ピン留めが外れていたら再度ピン留め
+                    await message.pin()
+                    print(f"📌 Re-pinned panel for {channel.name}")
+            except:
+                pass  # ピン留め確認失敗は無視
             
         except Exception as e:
             print(f"Failed to update panel for channel {channel.name}: {e}")
@@ -235,7 +243,7 @@ class PanelManager(UIService):
             
             # Create embed for summary
             embed = discord.Embed(
-                title="📝 議事録要約",
+                title="議事録",
                 description=summary,
                 color=0x00FF00
             )
