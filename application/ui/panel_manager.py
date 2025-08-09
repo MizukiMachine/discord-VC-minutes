@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
 from typing import Dict, Optional
+import asyncio
+import time
 
 from framework.interfaces.ui import UIService, PanelState, PanelProvider, ButtonInteractionHandler
 from infrastructure.config.settings import EnvironmentConfig
@@ -15,6 +17,8 @@ class PanelManager(UIService):
         self.config = config
         self.bot = bot
         self.panels: Dict[int, discord.Message] = {}
+        self.panel_last_posted: Dict[int, float] = {}  # 最終投稿時間追跡
+        self.repost_interval = 600  # 10分ごとに再投稿
         self.buffer_manager = RedisBufferManager(
             core_service=config,
             redis_url=config.get_config('REDIS_URL')
@@ -85,6 +89,7 @@ class PanelManager(UIService):
             
             message = await text_channel.send(embed=embed, view=view)
             self.panels[channel.id] = message
+            self.panel_last_posted[channel.id] = time.time()
             
             return message
             
@@ -93,20 +98,68 @@ class PanelManager(UIService):
             return None
     
     async def update_panel(self, channel: discord.VoiceChannel, state: PanelState) -> None:
-        """Update existing control panel"""
+        """Update existing control panel with periodic reposting"""
         if channel.id not in self.panels:
             return
         
         try:
-            message = self.panels[channel.id]
-            embed = await self.create_embed(state, channel.name)
-            view = self.create_view(state)
+            # 定期再投稿チェック
+            current_time = time.time()
+            last_posted = self.panel_last_posted.get(channel.id, 0)
             
-            await message.edit(embed=embed, view=view)
+            if current_time - last_posted > self.repost_interval:
+                # 10分経過: 新しいパネルを投稿
+                print(f"🔄 Reposting panel for {channel.name} (10min interval)")
+                await self.repost_panel(channel, state)
+            else:
+                # 通常の更新
+                message = self.panels[channel.id]
+                embed = await self.create_embed(state, channel.name)
+                view = self.create_view(state)
+                
+                await message.edit(embed=embed, view=view)
             
         except Exception as e:
             print(f"Failed to update panel for channel {channel.name}: {e}")
             # Remove invalid panel reference
+            if channel.id in self.panels:
+                del self.panels[channel.id]
+            if channel.id in self.panel_last_posted:
+                del self.panel_last_posted[channel.id]
+    
+    async def repost_panel(self, channel: discord.VoiceChannel, state: PanelState) -> None:
+        """Repost panel to latest position in text channel"""
+        try:
+            # Find corresponding text channel
+            text_channel = None
+            for text_ch in channel.guild.text_channels:
+                if channel.name.lower() in text_ch.name.lower():
+                    text_channel = text_ch
+                    break
+            
+            if not text_channel:
+                # Use first text channel as fallback
+                if channel.guild.text_channels:
+                    text_channel = channel.guild.text_channels[0]
+                else:
+                    print(f"❌ No text channel found for {channel.name}")
+                    return
+            
+            # Create new panel
+            embed = await self.create_embed(state, channel.name)
+            view = self.create_view(state)
+            
+            # Post new panel
+            new_message = await text_channel.send(embed=embed, view=view)
+            
+            # Update references
+            self.panels[channel.id] = new_message
+            self.panel_last_posted[channel.id] = time.time()
+            
+            print(f"✅ Panel reposted for {channel.name} to latest position")
+            
+        except Exception as e:
+            print(f"❌ Failed to repost panel for {channel.name}: {e}")
             if channel.id in self.panels:
                 del self.panels[channel.id]
     

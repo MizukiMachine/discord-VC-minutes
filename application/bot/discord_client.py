@@ -67,17 +67,15 @@ class DiscordMinutesBot(commands.Bot):
                 print(f"❌ Failed to setup panel for {vc.name}: {e}")
     
     async def scan_voice_channels(self, guild: discord.Guild) -> None:
-        """v2.0: 既存参加者がいるVCで自動録音開始"""
-        print(f"🔍 Scanning voice channels in {guild.name}")
+        """常時VC参加: 全VCで常時録音開始"""
+        print(f"🔍 Starting permanent recording for all voice channels in {guild.name}")
         for vc in guild.voice_channels:
-            non_bot_members = [m for m in vc.members if not m.bot]
-            if non_bot_members:
-                print(f"👥 Found {len(non_bot_members)} users in {vc.name}, starting auto recording...")
-                await self.start_auto_recording(vc)
-                # Update panel
-                panel_state = self.create_panel_state(vc)
-                if vc.id in self.panel_manager.panels:
-                    await self.panel_manager.update_panel(vc, panel_state)
+            print(f"🎙️ Starting permanent recording for {vc.name}...")
+            await self.start_permanent_recording(vc)
+            # Update panel
+            panel_state = self.create_panel_state(vc)
+            if vc.id in self.panel_manager.panels:
+                await self.panel_manager.update_panel(vc, panel_state)
     
     async def on_voice_state_update(
         self, 
@@ -85,44 +83,33 @@ class DiscordMinutesBot(commands.Bot):
         before: discord.VoiceState, 
         after: discord.VoiceState
     ) -> None:
+        # 常時VC参加モード: 自動入退室を無効化
+        # パネル状態の更新のみ実行
         if member.bot:
             return
             
-        if before.channel != after.channel:
-            if after.channel:
-                await self.handle_vc_join(member, after.channel)
-            if before.channel:
-                await self.handle_vc_leave(member, before.channel)
-    
-    async def handle_vc_join(self, member: discord.Member, channel: discord.VoiceChannel) -> None:
-        non_bot_members = [m for m in channel.members if not m.bot]
-        if len(non_bot_members) == 1:
-            # 最初の人が参加したら自動録音開始
-            await self.start_auto_recording(channel)
-        
-        # パネルの状態を更新
-        panel_state = self.create_panel_state(channel)
-        if channel.id in self.panel_manager.panels:
-            await self.panel_manager.update_panel(channel, panel_state)
-    
-    async def handle_vc_leave(self, member: discord.Member, channel: discord.VoiceChannel) -> None:
-        non_bot_members = [m for m in channel.members if not m.bot]
-        if len(non_bot_members) == 0 and channel.id in self.recorders:
-            await self.stop_recording(channel)
-        
         # パネルの状態を更新（メンバー数変更を反映）
-        panel_state = self.create_panel_state(channel)
-        if channel.id in self.panel_manager.panels:
-            await self.panel_manager.update_panel(channel, panel_state)
+        channels_to_update = set()
+        if after.channel:
+            channels_to_update.add(after.channel)
+        if before.channel and before.channel != after.channel:
+            channels_to_update.add(before.channel)
+            
+        for channel in channels_to_update:
+            panel_state = self.create_panel_state(channel)
+            if channel.id in self.panel_manager.panels:
+                await self.panel_manager.update_panel(channel, panel_state)
     
-    async def start_auto_recording(self, channel: discord.VoiceChannel) -> None:
-        """v2.0: スケジューラー不使用、直接録音開始"""
+    # 常時VC参加モード: 自動入退室関数は削除済み
+    
+    async def start_permanent_recording(self, channel: discord.VoiceChannel) -> None:
+        """常時VC参加: 常時録音開始"""
         if channel.id in self.recorders:
             print(f"🔄 Recording already active for {channel.name}")
             return
         
         try:
-            print(f"🎙️ Starting auto recording for {channel.name}")
+            print(f"🎙️ Starting permanent recording for {channel.name}")
             
             # Check if bot is already connected to this guild
             voice_client = None
@@ -150,10 +137,10 @@ class DiscordMinutesBot(commands.Bot):
             await recorder.start()
             self.recorders[channel.id] = recorder
             self.recording_start_times[channel.id] = time.time()
-            print(f"✅ Auto recording started for {channel.name}")
+            print(f"✅ Permanent recording started for {channel.name}")
                 
         except Exception as e:
-            print(f"❌ Error starting auto recording for {channel.name}: {e}")
+            print(f"❌ Error starting permanent recording for {channel.name}: {e}")
     
     
     async def stop_recording(self, channel: discord.VoiceChannel) -> None:
@@ -185,10 +172,10 @@ class DiscordMinutesBot(commands.Bot):
     
     
     def create_panel_state(self, channel: discord.VoiceChannel) -> PanelState:
-        """Create PanelState from bot's current state"""
-        # 常にリスニング状態として扱う（シンプル化）
+        """Create PanelState from bot's current state - 常時VC参加モード"""
+        # 常時リスニング状態（常時VC参加）
         is_recording = True
-        elapsed_time = 0
+        elapsed_time = int(time.time() - self.recording_start_times.get(channel.id, time.time()))
         
         non_bot_members = [m for m in channel.members if not m.bot]
         member_count = len(non_bot_members)

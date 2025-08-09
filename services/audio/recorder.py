@@ -10,6 +10,8 @@ import tempfile
 import os
 import time
 
+from services.transcription.vibe_client import VibeClient
+
 
 class AudioSink(discord.sinks.Sink):
     """py-cord Sink for capturing real Discord voice"""
@@ -106,6 +108,7 @@ class AudioRecorder:
         self.vibe_url = "http://localhost:3022"
         self.audio_chunks = []  # Store audio chunks for processing
         self.sink: Optional[AudioSink] = None
+        self.vibe_client = VibeClient(self.vibe_url)
         
     async def start(self) -> None:
         if not self.is_recording:
@@ -144,6 +147,12 @@ class AudioRecorder:
                 except Exception as e:
                     print(f"⚠️ Error cancelling recording task: {e}")
                 self.task = None
+            
+            # Clean up Vibe client
+            try:
+                await self.vibe_client.close()
+            except Exception as e:
+                print(f"⚠️ Error closing Vibe client: {e}")
             
             self.sink = None
     
@@ -272,46 +281,65 @@ class AudioRecorder:
     
 
     async def _transcribe_with_vibe(self, audio_data: bytes) -> Optional[str]:
-        """Vibeサーバーで音声文字起こし"""
+        """Vibeサーバーで音声文字起こし（JSON path形式）"""
+        temp_file = None
         try:
-            # 一時ファイルに音声データを保存（既にWAVフォーマット）
+            print(f"🎵 Sending WAV data to Vibe: {len(audio_data)} bytes")
+            
+            # 一時ファイルに音声データを保存
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(audio_data)  # audio_data is already WAV format
+                temp_file.write(audio_data)
                 temp_file.flush()
+                temp_path = temp_file.name
                 
-                print(f"🎵 Sending WAV file to Vibe: {len(audio_data)} bytes")
+                print(f"📁 Temp file created: {temp_path}")
                 
-                # Vibeサーバーに送信
+                # JSON形式でVibeサーバーに送信（日本語指定）
+                import aiohttp
                 async with aiohttp.ClientSession() as session:
-                    with open(temp_file.name, 'rb') as f:
-                        data = aiohttp.FormData()
-                        data.add_field('file', f, filename='audio.wav', content_type='audio/wav')
-                        
-                        async with session.post(
-                            f"{self.vibe_url}/transcribe",
-                            data=data,
-                            timeout=aiohttp.ClientTimeout(total=30)
-                        ) as response:
-                            print(f"🌐 Vibe response status: {response.status}")
-                            if response.status == 200:
-                                result = await response.json()
-                                transcription = result.get('text', '').strip()
+                    payload = {
+                        "path": temp_path,
+                        "lang": "ja"  # 日本語を明示的に指定
+                    }
+                    
+                    async with session.post(
+                        f"{self.vibe_url}/transcribe",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        print(f"🌐 Vibe response status: {response.status}")
+                        if response.status == 200:
+                            result = await response.json()
+                            print(f"📊 Vibe response: {result}")
+                            
+                            # segments形式から文字起こしを取得
+                            transcription = ""
+                            if 'segments' in result and result['segments']:
+                                # segments形式の場合、textフィールドを結合
+                                texts = [seg.get('text', '').strip() for seg in result['segments']]
+                                transcription = " ".join(texts).strip()
+                            
+                            if transcription and not transcription.startswith('(') and len(transcription) > 3:
                                 print(f"✅ Vibe transcription: {transcription[:100]}...")
                                 return transcription
                             else:
-                                error_text = await response.text()
-                                print(f"❌ Vibe error {response.status}: {error_text}")
+                                print("⚠️ No meaningful transcription (likely non-speech audio)")
                                 return None
+                        else:
+                            error_text = await response.text()
+                            print(f"❌ Vibe error {response.status}: {error_text}")
+                            return None
                                 
         except Exception as e:
             print(f"❌ Vibe transcription error: {e}")
             return None
         finally:
             # 一時ファイルを削除
-            try:
-                os.unlink(temp_file.name)
-            except:
-                pass
+            if temp_file:
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
     
     def _convert_to_wav(self, pcm_data: bytes) -> bytes:
         """PCMデータをWAVフォーマットに変換"""
