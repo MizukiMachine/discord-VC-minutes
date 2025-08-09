@@ -2,6 +2,7 @@
 import asyncio
 import signal
 import sys
+import os
 from typing import Optional
 
 from application.bot.discord_client import DiscordMinutesBot
@@ -35,6 +36,10 @@ async def main() -> None:
         # Initialize and start bot
         print("🤖 Starting Discord Minutes Bot...")
         bot = DiscordMinutesBot(config)
+        
+        # Cloud Run compatibility: Start health check server
+        port = int(os.environ.get('PORT', '8081'))
+        asyncio.create_task(start_health_server(port))
         
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
@@ -88,6 +93,24 @@ async def shutdown(bot: Optional[DiscordMinutesBot]) -> None:
     
     # Force exit
     sys.exit(0)
+
+
+async def start_health_server(port: int) -> None:
+    """Start simple HTTP health check server for Cloud Run"""
+    from aiohttp import web
+    
+    async def health_check(request):
+        return web.Response(text='OK', status=200)
+    
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🏥 Health server started on port {port}")
 
 
 if __name__ == "__main__":

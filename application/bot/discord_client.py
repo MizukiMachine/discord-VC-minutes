@@ -4,7 +4,6 @@ from typing import Dict, Optional
 import asyncio
 import time
 
-from services.scheduler.priority_scheduler import PriorityScheduler
 from services.audio.recorder import AudioRecorder
 from services.redis.buffer_manager import RedisBufferManager
 from services.summary.openai_client import OpenAIClient
@@ -28,9 +27,6 @@ class DiscordMinutesBot(commands.Bot):
         
         self.config = config or EnvironmentConfig()
         self.recorders: Dict[int, AudioRecorder] = {}
-        self.scheduler = PriorityScheduler(
-            max_concurrent=self.config.get_config('MAX_CONCURRENT_RECORDINGS') or 4
-        )
         self.panel_manager = PanelManager(self.config, self)
         self.recording_start_times: Dict[int, float] = {}
     
@@ -44,16 +40,44 @@ class DiscordMinutesBot(commands.Bot):
         await self.start(token)
     
     async def on_ready(self) -> None:
+        print(f"🤖 Bot is ready! Logged in as {self.user}")
         if hasattr(self, 'guilds'):
             for guild in self.guilds:
+                await self.setup_permanent_panels(guild)
                 await self.scan_voice_channels(guild)
     
-    async def scan_voice_channels(self, guild: discord.Guild) -> None:
+    async def setup_permanent_panels(self, guild: discord.Guild) -> None:
+        """Setup permanent control panels for all voice channels"""
+        print(f"📋 Setting up permanent panels for guild: {guild.name}")
         for vc in guild.voice_channels:
-            if len(vc.members) > 0:
-                non_bot_members = [m for m in vc.members if not m.bot]
-                if non_bot_members:
-                    await self.start_auto_recording(vc)
+            try:
+                # Create panel state for waiting state
+                panel_state = self.create_panel_state(vc)
+                
+                # Check if panel already exists for this channel
+                if vc.id not in self.panel_manager.panels:
+                    await self.panel_manager.post_panel(vc, panel_state)
+                    print(f"✅ Posted permanent panel for {vc.name}")
+                else:
+                    # Update existing panel
+                    await self.panel_manager.update_panel(vc, panel_state)
+                    print(f"🔄 Updated existing panel for {vc.name}")
+                    
+            except Exception as e:
+                print(f"❌ Failed to setup panel for {vc.name}: {e}")
+    
+    async def scan_voice_channels(self, guild: discord.Guild) -> None:
+        """v2.0: 既存参加者がいるVCで自動録音開始"""
+        print(f"🔍 Scanning voice channels in {guild.name}")
+        for vc in guild.voice_channels:
+            non_bot_members = [m for m in vc.members if not m.bot]
+            if non_bot_members:
+                print(f"👥 Found {len(non_bot_members)} users in {vc.name}, starting auto recording...")
+                await self.start_auto_recording(vc)
+                # Update panel
+                panel_state = self.create_panel_state(vc)
+                if vc.id in self.panel_manager.panels:
+                    await self.panel_manager.update_panel(vc, panel_state)
     
     async def on_voice_state_update(
         self, 
@@ -73,165 +97,98 @@ class DiscordMinutesBot(commands.Bot):
     async def handle_vc_join(self, member: discord.Member, channel: discord.VoiceChannel) -> None:
         non_bot_members = [m for m in channel.members if not m.bot]
         if len(non_bot_members) == 1:
+            # 最初の人が参加したら自動録音開始
             await self.start_auto_recording(channel)
+        
+        # パネルの状態を更新
+        panel_state = self.create_panel_state(channel)
+        if channel.id in self.panel_manager.panels:
+            await self.panel_manager.update_panel(channel, panel_state)
     
     async def handle_vc_leave(self, member: discord.Member, channel: discord.VoiceChannel) -> None:
         non_bot_members = [m for m in channel.members if not m.bot]
         if len(non_bot_members) == 0 and channel.id in self.recorders:
             await self.stop_recording(channel)
+        
+        # パネルの状態を更新（メンバー数変更を反映）
+        panel_state = self.create_panel_state(channel)
+        if channel.id in self.panel_manager.panels:
+            await self.panel_manager.update_panel(channel, panel_state)
     
     async def start_auto_recording(self, channel: discord.VoiceChannel) -> None:
+        """v2.0: スケジューラー不使用、直接録音開始"""
         if channel.id in self.recorders:
+            print(f"🔄 Recording already active for {channel.name}")
             return
-            
-        if self.scheduler.can_add_auto_recording(channel.id, len(channel.members)):
-            await self.start_recording(channel, is_manual=False)
-    
-    async def start_recording(self, channel: discord.VoiceChannel, is_manual: bool = False) -> bool:
-        if channel.id in self.recorders:
-            return False
-            
+        
         try:
-            if is_manual:
-                replaced_vc = self.scheduler.add_manual_recording(channel.id, len(channel.members))
-                if replaced_vc and replaced_vc in self.recorders:
-                    await self.stop_recording_by_id(replaced_vc)
-            else:
-                if not self.scheduler.add_auto_recording(channel.id, len(channel.members)):
-                    return False
+            print(f"🎙️ Starting auto recording for {channel.name}")
             
-            voice_client = await channel.connect()
+            # Check if bot is already connected to this guild
+            voice_client = None
+            for vc in self.voice_clients:
+                if vc.guild == channel.guild:
+                    if vc.channel != channel:
+                        await vc.disconnect()
+                    else:
+                        voice_client = vc
+                        break
+            
+            if not voice_client:
+                # Connect to voice channel
+                try:
+                    voice_client = await channel.connect()
+                    print(f"🔗 Connected to {channel.name}")
+                except Exception as e:
+                    print(f"❌ Failed to connect to {channel.name}: {e}")
+                    return
+            
+            # Create AudioRecorder with v1.0 interface
             recorder = AudioRecorder(channel, voice_client)
-            await recorder.start()
             
+            # Start recording
+            await recorder.start()
             self.recorders[channel.id] = recorder
             self.recording_start_times[channel.id] = time.time()
-            
-            # Create or update control panel
-            panel_state = self.create_panel_state(channel)
-            await self.panel_manager.post_panel(channel, panel_state)
-            
-            return True
-            
+            print(f"✅ Auto recording started for {channel.name}")
+                
         except Exception as e:
-            print(f"Failed to start recording for {channel.name}: {e}")
-            if channel.id in self.recorders:
-                del self.recorders[channel.id]
-            self.scheduler.remove_recording(channel.id)
-            return False
+            print(f"❌ Error starting auto recording for {channel.name}: {e}")
+    
     
     async def stop_recording(self, channel: discord.VoiceChannel) -> None:
         await self.stop_recording_by_id(channel.id)
     
     async def stop_recording_by_id(self, channel_id: int) -> None:
+        """v2.0: スケジューラー不使用の録音停止"""
         if channel_id in self.recorders:
             try:
+                print(f"🛑 Stopping recording for channel {channel_id}")
                 recorder = self.recorders[channel_id]
                 await recorder.stop()
                 
-                if recorder.voice_client and recorder.voice_client.is_connected():
-                    await recorder.voice_client.disconnect()
+                # VoiceClient切断は AudioRecorder内で処理される
                     
             except Exception as e:
-                print(f"Error stopping recording for channel {channel_id}: {e}")
+                print(f"❌ Error stopping recording for channel {channel_id}: {e}")
             finally:
                 del self.recorders[channel_id]
-                self.scheduler.remove_recording(channel_id)
                 if channel_id in self.recording_start_times:
                     del self.recording_start_times[channel_id]
                 
-                # Update control panel to show stopped state
+                # Update control panel
                 channel = self.get_channel(channel_id)
                 if channel:
                     panel_state = self.create_panel_state(channel)
                     await self.panel_manager.update_panel(channel, panel_state)
+                    print(f"✅ Recording stopped for {channel.name}")
     
-    @commands.command(name='sofar', help='現在のボイスチャンネルの議事録を要約します')
-    async def sofar_command(self, ctx: commands.Context) -> None:
-        """Generate and post summary of current voice channel discussion"""
-        try:
-            # Check if user is in a voice channel
-            if not ctx.author.voice or not ctx.author.voice.channel:
-                await ctx.send("❌ ボイスチャンネルに参加してからコマンドを使用してください。")
-                return
-            
-            voice_channel = ctx.author.voice.channel
-            channel_id = voice_channel.id
-            
-            # Check if recording is active for this channel
-            if channel_id not in self.recorders:
-                await ctx.send("❌ このボイスチャンネルで録音が開始されていません。")
-                return
-            
-            # Check configuration
-            openai_api_key = self.config.get_config('OPENAI_API_KEY')
-            redis_url = self.config.get_config('REDIS_URL')
-            
-            if not openai_api_key or not redis_url:
-                await ctx.send("❌ 設定が不完全です。OPENAI_API_KEYまたはREDIS_URLが設定されていません。")
-                return
-            
-            # Notify user that processing started
-            processing_msg = await ctx.send("🤖 議事録を要約中...")
-            
-            # Get audio data from Redis buffer
-            buffer_manager = RedisBufferManager(
-                core_service=self.config,
-                redis_url=redis_url
-            )
-            
-            try:
-                audio_chunks = await buffer_manager.get_all_audio_chunks(str(channel_id))
-                
-                if not audio_chunks:
-                    await processing_msg.edit(content="❌ 要約する音声データがありません。録音開始後しばらく待ってから再試行してください。")
-                    return
-                
-                # Combine audio chunks for summarization
-                combined_text = "\n".join(audio_chunks)
-                
-                # Initialize OpenAI client and summarize
-                openai_client = OpenAIClient(
-                    core_service=self.config,
-                    api_key=openai_api_key
-                )
-                
-                response = openai_client.summarize(combined_text)
-                
-                if response.success:
-                    # Create embed for summary
-                    embed = discord.Embed(
-                        title="📜 議事録要約",
-                        description=response.summary,
-                        color=0x00FF00
-                    )
-                    embed.add_field(
-                        name="📊 処理情報", 
-                        value=f"トークン使用量: {response.total_tokens}\n処理段階: {response.stages}段階",
-                        inline=False
-                    )
-                    embed.set_footer(text=f"チャンネル: {voice_channel.name}")
-                    
-                    await processing_msg.delete()
-                    await voice_channel.send(embed=embed)
-                    
-                else:
-                    await processing_msg.edit(content=f"❌ 要約処理でエラーが発生しました: {response.error_message}")
-                    
-            finally:
-                await buffer_manager.close()
-                
-        except Exception as e:
-            await ctx.send(f"❌ 予期しないエラーが発生しました: {str(e)}")
-            print(f"Error in sofar command: {e}")
     
     def create_panel_state(self, channel: discord.VoiceChannel) -> PanelState:
         """Create PanelState from bot's current state"""
-        is_recording = channel.id in self.recorders
+        # 常にリスニング状態として扱う（シンプル化）
+        is_recording = True
         elapsed_time = 0
-        
-        if is_recording and channel.id in self.recording_start_times:
-            elapsed_time = int(time.time() - self.recording_start_times[channel.id])
         
         non_bot_members = [m for m in channel.members if not m.bot]
         member_count = len(non_bot_members)
@@ -245,24 +202,39 @@ class DiscordMinutesBot(commands.Bot):
     
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions"""
-        if not interaction.custom_id:
-            return
-        
-        parts = interaction.custom_id.split('_')
-        if len(parts) != 2:
-            return
-        
-        action, channel_id_str = parts
         try:
-            channel_id = int(channel_id_str)
-        except ValueError:
-            return
-        
-        if action == "stop":
-            await self.panel_manager.handle_stop(interaction, channel_id)
-        elif action == "sofar":
-            await self.panel_manager.handle_summary(interaction, channel_id)
-        elif action == "save30":
-            await self.panel_manager.handle_save_transcript(interaction, channel_id)
-        elif action == "start":
-            await self.panel_manager.handle_start_recording(interaction, channel_id)
+            # Discord.pyバージョン対応: data.custom_idを確認
+            if not hasattr(interaction, 'data') or not interaction.data:
+                print(f"❌ No interaction data")
+                return
+                
+            custom_id = interaction.data.get('custom_id')
+            print(f"🎯 Interaction received: {custom_id}")
+            
+            if not custom_id:
+                return
+            
+            parts = custom_id.split('_')
+            if len(parts) != 2:
+                print(f"❌ Invalid custom_id format: {custom_id}")
+                return
+            
+            action, channel_id_str = parts
+            try:
+                channel_id = int(channel_id_str)
+            except ValueError:
+                print(f"❌ Invalid channel_id: {channel_id_str}")
+                return
+            
+            print(f"📝 Processing {action} for channel {channel_id}")
+            
+            if action == "sofar":
+                await self.panel_manager.handle_summary(interaction, channel_id)
+                print(f"✅ Summary request processed for channel {channel_id}")
+        except Exception as e:
+            print(f"❌ Error in interaction handler: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
+            except:
+                pass

@@ -1,0 +1,44 @@
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build', 
+      '-t', 'gcr.io/$PROJECT_ID/discord-minutes-bot:$BUILD_ID',
+      '-t', 'gcr.io/$PROJECT_ID/discord-minutes-bot:latest',
+      '.'
+    ]
+
+  # Push Docker image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/discord-minutes-bot:$BUILD_ID']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/discord-minutes-bot:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args: [
+      'run', 'deploy', 'discord-minutes-bot',
+      '--image', 'gcr.io/$PROJECT_ID/discord-minutes-bot:$BUILD_ID',
+      '--region', 'asia-northeast1',
+      '--platform', 'managed',
+      '--allow-unauthenticated',
+      '--memory', '1Gi',
+      '--cpu', '1',
+      '--concurrency', '1',
+      '--max-instances', '1',
+      '--set-env-vars', 'ENVIRONMENT=production'
+    ]
+
+# Store images in Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/discord-minutes-bot:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/discord-minutes-bot:latest'
+
+# Build options
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+  
+timeout: '1200s'  # 20 minutes build timeout

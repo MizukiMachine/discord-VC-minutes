@@ -42,23 +42,8 @@ class ButtonInteractionHandler(ABC):
     """Abstract interface for button interaction handling"""
     
     @abstractmethod
-    async def handle_stop(self, interaction: discord.Interaction, channel_id: int) -> None:
-        """Handle stop recording button"""
-        pass
-    
-    @abstractmethod
     async def handle_summary(self, interaction: discord.Interaction, channel_id: int) -> None:
-        """Handle summary request button"""
-        pass
-    
-    @abstractmethod
-    async def handle_save_transcript(self, interaction: discord.Interaction, channel_id: int) -> None:
-        """Handle save transcript button"""
-        pass
-    
-    @abstractmethod
-    async def handle_start_recording(self, interaction: discord.Interaction, channel_id: int) -> None:
-        """Handle start recording button"""
+        """Handle summary request button (今まで)"""
         pass
 
 
