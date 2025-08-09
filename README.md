@@ -1,0 +1,62 @@
+# Discord議事録Bot
+
+Discord ボイスチャットを自動で文字起こし・要約するBotです
+
+## 概要
+
+- VC参加と同時に自動録音開始
+- 「📜今まで」ボタンで即座に議事録生成
+- 過去2時間分の会話をいつでも要約可能
+
+## 機能
+
+| 機能 | 説明 |
+|------|------|
+| **自動録音** | VC参加で自動開始、録音忘れゼロ |
+| **ワンクリック要約** | ボタン1つで議事録作成 |
+| **2時間バッファ** | 過去2時間分の音声を自動保持 |
+| **日本語対応** | Whisperによる高精度文字起こし |
+
+## システム構成
+
+```
+Discord音声 → Whisper文字起こし → Redis保存 → GPT-4o-mini要約 → Discord投稿
+```
+
+## セットアップ
+
+### 環境変数
+
+```bash
+export DISCORD_BOT_TOKEN="your-token"
+export OPENAI_API_KEY="your-key"
+export REDIS_URL="redis://localhost:6379"
+export VIBE_URL="http://localhost:3022"
+```
+
+### インストール
+
+```bash
+# 依存関係
+pip install -r requirements.txt
+
+# Whisperサーバー起動
+docker run -d --gpus all ghcr.io/thewh1teagle/vibe:latest --server --port 3022
+
+# Bot起動
+python main.py
+```
+
+## Docker
+
+```bash
+docker build -t discord-minutes-bot .
+docker run --env-file .env discord-minutes-bot
+```
+
+
+## 必要な権限
+
+- 音声チャンネルに接続
+- メッセージの送信
+- メッセージの管理（ピン留め用）
